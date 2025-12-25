@@ -1,4 +1,19 @@
+# Python junk
 __pycache__/
-*.pyc
-.vscode/
+*.py[cod]
+*$py.class
+
+# OS junk
 .DS_Store
+Thumbs.db
+
+# VS Code settings
+.vscode/
+
+# Blender backup files
+*.blend1
+*.blend2
+*.blend3
+
+# Templates
+module_template.py
