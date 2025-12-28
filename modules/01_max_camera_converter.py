@@ -121,7 +121,14 @@ def apply_two_point_perspective_logic(context):
     cam_obj.rotation_mode = "XYZ"
     cam_rotation = cam_obj.rotation_euler.copy()
     cam_position = cam_obj.location.copy()
-    
+    orig_shift_y = cam.shift_y
+
+    # Save original state for reset
+    cam_obj["pm_perspective_orig_loc"] = cam_position
+    cam_obj["pm_perspective_orig_rot"] = cam_rotation
+    cam_obj["pm_perspective_orig_shift_y"] = orig_shift_y
+    cam_obj["pm_perspective_applied"] = True
+
     focal_length = cam.lens
     ratio = scene.render.resolution_x / scene.render.resolution_y
     
@@ -162,7 +169,23 @@ def reset_perspective_logic(context):
     if not cam_obj:
         return False, "No camera selected"
     
-    cam_obj.data.shift_y = 0
+    # Try to restore from saved state first
+    if cam_obj.get("pm_perspective_applied"):
+        if "pm_perspective_orig_loc" in cam_obj:
+            cam_obj.location = cam_obj["pm_perspective_orig_loc"]
+        if "pm_perspective_orig_rot" in cam_obj:
+            cam_obj.rotation_euler = cam_obj["pm_perspective_orig_rot"]
+        if "pm_perspective_orig_shift_y" in cam_obj:
+            cam_obj.data.shift_y = cam_obj["pm_perspective_orig_shift_y"]
+        
+        # Cleanup
+        del cam_obj["pm_perspective_applied"]
+        for prop in ["pm_perspective_orig_loc", "pm_perspective_orig_rot", "pm_perspective_orig_shift_y"]:
+            if prop in cam_obj:
+                del cam_obj[prop]
+    else:
+        # Fallback for old sessions/external cameras: just zero shift
+        cam_obj.data.shift_y = 0
     
     # Restore constraints (like Track To)
     for const in cam_obj.constraints:
