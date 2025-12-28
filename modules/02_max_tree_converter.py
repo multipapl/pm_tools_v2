@@ -28,12 +28,14 @@ TEXTURE_SUFFIXES = {
 # --- LOGIC ---
 
 def ensure_leaf_shader_logic():
-    """Checks if the leaf shader node group exists, and if not, attempts to append it from assets."""
+    """
+    Checks if the leaf shader node group exists.
+    If missing, attempts to append it from the addon's asset library.
+    """
     group_name = LEAF_SHADER_INFO['node_group_name']
     if group_name in bpy.data.node_groups:
         return True, ""
 
-    # Path to assets/node_library.blend in the addon folder
     addon_dir = os.path.dirname(os.path.dirname(__file__))
     blend_path = os.path.join(addon_dir, "assets", "node_library.blend")
 
@@ -51,7 +53,7 @@ def ensure_leaf_shader_logic():
         return False, f"Failed to append node group: {str(e)}"
 
 def find_asset_keyword(material_name, keywords):
-    """Finds a matching keyword in the material name to determine its type."""
+    """Searches for a keyword in the material name to categorize it."""
     mat_name_lower = material_name.lower().replace(" ", "_")
     for keyword in keywords:
         if keyword in mat_name_lower:
@@ -59,7 +61,9 @@ def find_asset_keyword(material_name, keywords):
     return None
 
 def find_texture_path(material_name, tex_type, texture_folder, texture_files):
-    """Searches for a texture file matching the material name and texture type."""
+    """
+    Attempts to find a matching texture file based on material name and type suffixes.
+    """
     base_name = material_name.lower().replace(" ", "_")
     suffixes = TEXTURE_SUFFIXES.get(tex_type, [])
     for filename in texture_files:
@@ -73,11 +77,11 @@ def find_texture_path(material_name, tex_type, texture_folder, texture_files):
     return None
 
 def create_texture_node(nodes, path, tex_type, y_pos):
-    """Creates an image texture node and sets the correct color space."""
+    """Creates a ShaderNodeTexImage, loads the image, and sets the color space."""
     tex_node = nodes.new('ShaderNodeTexImage')
     try:
         tex_node.image = bpy.data.images.load(path, check_existing=True)
-    except Exception:
+    except:
         return None
         
     tex_node.location = (-650, y_pos)
@@ -88,14 +92,16 @@ def create_texture_node(nodes, path, tex_type, y_pos):
     return tex_node
 
 def process_materials_logic(context, materials_to_process, opaque_maps_to_use, transparent_maps_to_use):
-    """Processes materials by connecting textures to appropriate shaders."""
+    """
+    Core logic for processing vegetation materials.
+    Constructs a node tree (Leaf Shader or Principled BSDF) based on keywords.
+    """
     props = context.scene.pm_maxtree_converter_props
     texture_folder = bpy.path.abspath(props.texture_folder_path)
     
     if not os.path.isdir(texture_folder): 
         return 0, "Texture folder not found"
 
-    # Pre-parse keywords
     transparent_keywords = [k.strip().lower() for k in props.transparent_keywords.split(',') if k.strip()]
     opaque_keywords = [k.strip().lower() for k in props.opaque_keywords.split(',') if k.strip()]
     all_keywords = transparent_keywords + opaque_keywords
@@ -105,10 +111,7 @@ def process_materials_logic(context, materials_to_process, opaque_maps_to_use, t
     except Exception as e:
         return 0, f"Error reading texture folder: {str(e)}"
 
-    # Attempt to load the leaf shader if it might be needed
-    shader_ready, shader_error = ensure_leaf_shader_logic()
-    if not shader_ready:
-        print(f"[PM Tools] Warning: {shader_error}")
+    ensure_leaf_shader_logic()
 
     processed_count = 0
     for mat in materials_to_process:
@@ -122,8 +125,8 @@ def process_materials_logic(context, materials_to_process, opaque_maps_to_use, t
         nodes = mat.node_tree.nodes
         links = mat.node_tree.links
         
-        # Clear existing nodes except for the Output
-        for node in nodes:
+        # Clear existing nodes except output
+        for node in list(nodes):
             if node.type != 'OUTPUT_MATERIAL': 
                 nodes.remove(node)
         
@@ -134,7 +137,6 @@ def process_materials_logic(context, materials_to_process, opaque_maps_to_use, t
         is_transparent = asset_keyword in transparent_keywords
         is_opaque = asset_keyword in opaque_keywords
 
-        # 1. Setup the main shader node
         if is_transparent:
             group_name = LEAF_SHADER_INFO['node_group_name']
             if group_name in bpy.data.node_groups:
@@ -146,7 +148,6 @@ def process_materials_logic(context, materials_to_process, opaque_maps_to_use, t
                 socket_map = LEAF_SHADER_INFO['socket_map']
                 base_color_node = None
                 
-                # Connection logic for transparent materials
                 if transparent_maps_to_use.get('BASE_COLOR'):
                     path = find_texture_path(mat.name, 'BASE_COLOR', texture_folder, texture_files)
                     if path:
@@ -186,7 +187,6 @@ def process_materials_logic(context, materials_to_process, opaque_maps_to_use, t
             shader.location = (-250, 0)
             links.new(shader.outputs[0], output_node.inputs['Surface'])
             
-            # Connection logic for opaque materials
             if opaque_maps_to_use.get('BASE_COLOR'):
                 path = find_texture_path(mat.name, 'BASE_COLOR', texture_folder, texture_files)
                 if path:
@@ -222,11 +222,11 @@ def process_materials_logic(context, materials_to_process, opaque_maps_to_use, t
                             links.new(tex_node.outputs['Color'], invert_node.inputs['Color'])
                             links.new(invert_node.outputs['Color'], shader.inputs['Roughness'])
         
-        # Set viewport colors for better organization
+        # Color coding for viewport
         if is_transparent: 
-            mat.diffuse_color = (0.095, 0.185, 0.036, 1.0) # Greenish
+            mat.diffuse_color = (0.095, 0.185, 0.036, 1.0)
         elif is_opaque: 
-            mat.diffuse_color = (0.163, 0.116, 0.058, 1.0) # Brownish
+            mat.diffuse_color = (0.163, 0.116, 0.058, 1.0)
             
         processed_count += 1
         
@@ -235,27 +235,48 @@ def process_materials_logic(context, materials_to_process, opaque_maps_to_use, t
 # --- CLASSES ---
 
 class PM_MaxTreeConverterProps(bpy.types.PropertyGroup):
-    """Properties for the MaxTree Converter tool"""
-    texture_folder_path: bpy.props.StringProperty(name="Texture Folder", subtype='DIR_PATH')
-    transparent_keywords: bpy.props.StringProperty(name="Transparent Keywords", default="leaf,leaves,needle,flower")
-    opaque_keywords: bpy.props.StringProperty(name="Opaque Keywords", default="bark,trunk,branch,mesh,stem,fruit")
+    """Persistent properties for vegetation material conversion."""
     
-    # Opaque toggles
+    texture_folder_path: bpy.props.StringProperty(
+        name="Texture Folder", 
+        description="Path to the folder containing plant textures",
+        subtype='DIR_PATH'
+    )
+    
+    transparent_keywords: bpy.props.StringProperty(
+        name="Transparent Keywords", 
+        description="Material name keywords that trigger transparent leaf shader setup",
+        default="leaf,leaves,needle,flower"
+    )
+    
+    opaque_keywords: bpy.props.StringProperty(
+        name="Opaque Keywords", 
+        description="Material name keywords that trigger opaque Principled BSDF setup",
+        default="bark,trunk,branch,mesh,stem,fruit"
+    )
+    
+    show_settings: bpy.props.BoolProperty(
+        name="Show Settings", 
+        description="Toggle advanced settings for keyword and map filtering",
+        default=False
+    )
+    
+    # Map toggles for Opaque materials
     use_opaque_base_color: bpy.props.BoolProperty(name="Base Color", default=True)
     use_opaque_roughness: bpy.props.BoolProperty(name="Roughness", default=True)
     use_opaque_normal: bpy.props.BoolProperty(name="Normal Map", default=True)
     
-    # Transparent toggles
+    # Map toggles for Transparent materials
     use_transparent_base_color: bpy.props.BoolProperty(name="Base Color", default=True)
     use_transparent_opacity: bpy.props.BoolProperty(name="Opacity", default=True)
     use_transparent_normal: bpy.props.BoolProperty(name="Normal Map", default=False)
     use_transparent_translucency: bpy.props.BoolProperty(name="Translucency", default=False)
 
 class PM_OT_MaxTreeConverter(bpy.types.Operator):
-    """Automates material setup for vegetation: loads textures based on 
-    keywords and connects them to the PAPL_LeafShader or Principled BSDF"""
+    """Converts standard MaxTree/Evermotion materials to a custom Blender PBR setup."""
     bl_idname = "pm.maxtree_converter"
     bl_label = "Process Plant Materials"
+    bl_description = "Convert vegetation materials of selected objects based on name keywords"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -270,7 +291,6 @@ class PM_OT_MaxTreeConverter(bpy.types.Operator):
             self.report({'WARNING'}, "Please select at least one Mesh object")
             return {'CANCELLED'}
             
-        # Collect all materials from selected objects
         materials = set()
         for obj in selected_objects:
             for slot in obj.material_slots:
@@ -303,27 +323,36 @@ class PM_OT_MaxTreeConverter(bpy.types.Operator):
 
 # --- UI DRAWING ---
 
-class PM_PT_MaxTreeSettings(bpy.types.Panel):
-    """Sub-panel drawing in a popover for MaxTree settings"""
-    bl_label = "MaxTree Settings"
-    bl_idname = "PM_PT_maxtree_settings"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    # Removing bl_category and adding HIDE_HEADER to keep it out of the N-Panel list
-    bl_options = {'HIDE_HEADER'}
-
-    def draw(self, context):
-        layout = self.layout
-        props = context.scene.pm_maxtree_converter_props
+def draw_ui(layout, context):
+    """Renders the MaxTree Converter panel in the N-panel."""
+    props = context.scene.pm_maxtree_converter_props
+    box = layout.box()
+    
+    # Header row with title and settings toggle
+    header = box.row(align=True)
+    header.label(text="MaxTree Converter", icon='NODE_MATERIAL')
+    header.prop(props, "show_settings", text="", icon='SETTINGS', toggle=True)
+    
+    # Folder selection
+    row = box.row(align=True)
+    row.prop(props, "texture_folder_path", text="")
+    
+    # Main action button
+    box.operator("pm.maxtree_converter", text="Process Materials", icon='FORWARD')
+    
+    # Advanced Settings (Collapsible)
+    if props.show_settings:
+        sbox = box.box()
+        sbox.label(text="Advanced Settings", icon='PREFERENCES')
         
-        col = layout.column(align=True)
+        col = sbox.column(align=True)
         col.label(text="Keywords:")
         col.prop(props, "opaque_keywords", text="Opaque")
         col.prop(props, "transparent_keywords", text="Trans")
         
-        layout.separator()
+        sbox.separator()
         
-        split = layout.split(factor=0.5)
+        split = sbox.split(factor=0.5)
         col1 = split.column(align=True)
         col1.label(text="Opaque Maps:")
         col1.prop(props, "use_opaque_base_color")
@@ -337,34 +366,25 @@ class PM_PT_MaxTreeSettings(bpy.types.Panel):
         col2.prop(props, "use_transparent_normal")
         col2.prop(props, "use_transparent_translucency")
 
-def draw_ui(layout):
-    scene = bpy.context.scene
-    props = scene.pm_maxtree_converter_props
-    
-    box = layout.box()
-    box.label(text="MaxTree Converter", icon='NODE_MATERIAL')
-    
-    row = box.row(align=True)
-    row.prop(props, "texture_folder_path", text="")
-    # Settings Popover
-    row.popover(panel="PM_PT_maxtree_settings", icon='SETTINGS', text="")
-    
-    box.operator("pm.maxtree_converter", text="Process Materials", icon='FORWARD')
-
 # --- REGISTRATION ---
 
 classes = (
     PM_MaxTreeConverterProps,
     PM_OT_MaxTreeConverter,
-    PM_PT_MaxTreeSettings,
 )
 
 def register():
+    """Register classes and property group for the MaxTree module."""
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.pm_maxtree_converter_props = bpy.props.PointerProperty(type=PM_MaxTreeConverterProps)
 
 def unregister():
+    """Unregister classes and clean up scene properties."""
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.pm_maxtree_converter_props
+        try:
+            bpy.utils.unregister_class(cls)
+        except:
+            pass
+    if hasattr(bpy.types.Scene, "pm_maxtree_converter_props"):
+        del bpy.types.Scene.pm_maxtree_converter_props

@@ -69,7 +69,7 @@ class PM_OT_ArrangeAssets(bpy.types.Operator):
 
 # --- UI DRAWING ---
 
-def draw_ui(layout):
+def draw_ui(layout, context):
     scene = bpy.context.scene
     box = layout.box()
     box.label(text="Arrange Tools", icon='SORTSIZE')

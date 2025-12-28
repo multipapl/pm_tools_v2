@@ -31,6 +31,34 @@ def mesh_to_ic_logic(context):
         
     return None
 
+def link_instances_by_vertex_count_logic(context):
+    """
+    Groups selected mesh objects by vertex count and links those 
+    with identical counts to share the same mesh data (master instance).
+    """
+    selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH' and obj.data]
+    
+    if len(selected_meshes) < 2:
+        return None, "Please select at least two mesh objects"
+
+    groups = {}
+    for obj in selected_meshes:
+        v_count = len(obj.data.vertices)
+        if v_count not in groups:
+            groups[v_count] = []
+        groups[v_count].append(obj)
+
+    linked_count = 0
+    for v_count, obs in groups.items():
+        if len(obs) > 1:
+            master_data = obs[0].data
+            for i in range(1, len(obs)):
+                if obs[i].data != master_data:
+                    obs[i].data = master_data
+                    linked_count += 1
+                
+    return linked_count, None
+
 def defuck_lights_logic(context):
     """Adjusts custom distance of lights (legacy fix for imported scenes)."""
     count = 0
@@ -39,14 +67,6 @@ def defuck_lights_logic(context):
             obj.data.cutoff_distance /= 100
             count += 1
     return count
-
-def toggle_modifiers_logic(context, target_name="Optimization"):
-    """Toggles visibility of modifiers with a specific name."""
-    for obj in context.selected_objects:
-        for mod in obj.modifiers:
-            if target_name.lower() in mod.name.lower():
-                mod.show_viewport = not mod.show_viewport
-                mod.show_render = mod.show_viewport
 
 def cleanup_material_duplicates_logic(context):
     """Finds and replaces material duplicates (e.g. Mat.001 -> Mat)."""
@@ -64,7 +84,7 @@ def cleanup_material_duplicates_logic(context):
                     master_mat = bpy.data.materials.get(base_name)
                     if master_mat:
                         replacements[mat.name] = master_mat
-
+                                            
     count = 0
     for obj in selected_meshes:
         for i, mat in enumerate(obj.data.materials):
@@ -76,8 +96,7 @@ def cleanup_material_duplicates_logic(context):
 # --- OPERATORS ---
 
 class PM_OT_MeshToIC(bpy.types.Operator):
-    """Converts classic mesh objects into Collection Instances to 
-    drastically reduce scene memory and file size"""
+    """Converts classic mesh objects into Collection Instances"""
     bl_idname = "pm.mesh_to_ic"
     bl_label = "Mesh to IC"
     bl_options = {'REGISTER', 'UNDO'}
@@ -93,11 +112,30 @@ class PM_OT_MeshToIC(bpy.types.Operator):
             return {'CANCELLED'}
         return {'FINISHED'}
 
+class PM_OT_LinkByVCount(bpy.types.Operator):
+    """Links objects with identical vertex counts to share mesh data"""
+    bl_idname = "pm.link_by_vcount"
+    bl_label = "Link Instances (by Verts)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        return len(meshes) >= 2
+
+    def execute(self, context):
+        count, error = link_instances_by_vertex_count_logic(context)
+        if error:
+            self.report({'WARNING'}, error)
+            return {'CANCELLED'}
+            
+        self.report({'INFO'}, f"Linked {count} instances")
+        return {'FINISHED'}
+
 class PM_OT_DeFuckLights(bpy.types.Operator):
-    """Scales down light cutoff distance by 100x to fix overblown 
-    lighting issues after importing scenes from other software"""
+    """Fixes overblown lighting from imported scenes by scaling cutoff 100x"""
     bl_idname = "pm.defuck_lights"
-    bl_label = "DeFuck Lights"
+    bl_label = "Fix Lights"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -106,29 +144,13 @@ class PM_OT_DeFuckLights(bpy.types.Operator):
 
     def execute(self, context):
         count = defuck_lights_logic(context)
-        self.report({'INFO'}, f"Successfully fixed {count} lights")
-        return {'FINISHED'}
-
-class PM_OT_ToggleModifiers(bpy.types.Operator):
-    """Quickly hide or show all modifiers named 'Optimization' across 
-    selection (useful for disabling high-poly displacement/subdiv)"""
-    bl_idname = "pm.toggle_modifiers"
-    bl_label = "Toggle Modifiers"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return len(context.selected_objects) > 0
-
-    def execute(self, context):
-        toggle_modifiers_logic(context)
+        self.report({'INFO'}, f"Fixed {count} lights")
         return {'FINISHED'}
 
 class PM_OT_CleanupMaterialDuplicates(bpy.types.Operator):
-    """Merges materials with '.001', '.002' suffixes into their parent 
-    material to keep the scene's material list clean"""
+    """Merges material duplicates (.001, .002, etc.)"""
     bl_idname = "pm.cleanup_material_duplicates"
-    bl_label = "Delete Material Duplicates"
+    bl_label = "Cleanup Material Duplicates"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -137,29 +159,35 @@ class PM_OT_CleanupMaterialDuplicates(bpy.types.Operator):
 
     def execute(self, context):
         count = cleanup_material_duplicates_logic(context)
-        self.report({'INFO'}, f"Cleaned up {count} material slots")
+        self.report({'INFO'}, f"Cleaned up {count} slots")
         return {'FINISHED'}
 
 # --- UI DRAWING ---
 
-def draw_ui(layout):
+def draw_ui(layout, context):
     box = layout.box()
     box.label(text="Optimization", icon='MODIFIER')
     
-    row = box.row(align=True)
-    row.operator("pm.mesh_to_ic", text="Mesh to IC", icon='OUTLINER_OB_GROUP_INSTANCE')
-    row.operator("pm.defuck_lights", text="Fix Lights", icon='OUTLINER_OB_LIGHT')
-    
+    # 1. Instancing Tools
     col = box.column(align=True)
-    col.operator("pm.toggle_modifiers", text="Toggle 'Optimization' Mods", icon='HIDE_OFF')
-    col.operator("pm.cleanup_material_duplicates", text="Cleanup Materials", icon='MATERIAL')
+    col.label(text="Instancing:")
+    row = col.row(align=True)
+    row.operator("pm.mesh_to_ic", text="Mesh to IC", icon='OUTLINER_OB_GROUP_INSTANCE')
+    row.operator("pm.link_by_vcount", text="Link (Verts)", icon='LINKED')
+    
+    # 2. Scene Refinement Tools
+    col = box.column(align=True)
+    col.label(text="Refinement:")
+    row = col.row(align=True)
+    row.operator("pm.defuck_lights", text="Fix Lights", icon='OUTLINER_OB_LIGHT')
+    row.operator("pm.cleanup_material_duplicates", text="Materials", icon='MATERIAL')
 
 # --- REGISTRATION ---
 
 classes = (
     PM_OT_MeshToIC,
+    PM_OT_LinkByVCount,
     PM_OT_DeFuckLights,
-    PM_OT_ToggleModifiers,
     PM_OT_CleanupMaterialDuplicates,
 )
 

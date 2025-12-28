@@ -106,7 +106,7 @@ class PM_OT_DeleteUnusedCollections(bpy.types.Operator):
 
 # --- UI DRAWING ---
 
-def draw_ui(layout):
+def draw_ui(layout, context):
     box = layout.box()
     box.label(text="Collection Cleanup", icon='COLLECTION_NEW')
     

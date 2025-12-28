@@ -79,7 +79,11 @@ class PM_PT_MainPanel(bpy.types.Panel):
             if is_expanded:
                 for module in modules:
                     if hasattr(module, "draw_ui"):
-                        module.draw_ui(box)
+                        try:
+                            module.draw_ui(box, context)
+                        except Exception as e:
+                            print(f"[PM Tools] Error drawing UI for module '{module.__name__}': {e}")
+                            box.label(text=f"Error in {module.__name__}", icon='ERROR')
 
 # --- REGISTRATION ---
 

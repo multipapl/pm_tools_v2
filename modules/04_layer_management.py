@@ -138,7 +138,7 @@ class PM_OT_CreateSet2(bpy.types.Operator):
 
 # --- UI DRAWING ---
 
-def draw_ui(layout):
+def draw_ui(layout, context):
     box = layout.box()
     box.label(text="Layer Management", icon='OUTLINER_OB_GROUP_INSTANCE')
     row = box.row(align=True)

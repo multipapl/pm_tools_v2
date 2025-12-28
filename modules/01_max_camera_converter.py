@@ -2,14 +2,32 @@ import bpy
 import re
 import math
 
+from mathutils import Vector
+
 UI_CATEGORY = "CONVERTERS"
+
+# --- HELPERS ---
+
+def nearest_quarter(ang):
+    """Calculates the nearest quarter circle (90, 180, 270, 360) of an angle."""
+    return (((round((ang / math.pi) / 0.5)) / 4) * (2 * math.pi)) % (2 * math.pi)
+
+def get_active_camera(context):
+    """Returns the active camera object (active object first, then scene camera)."""
+    cam_obj = context.active_object
+    if not cam_obj or cam_obj.type != 'CAMERA':
+        cam_obj = context.scene.camera
+    
+    if cam_obj and cam_obj.type == 'CAMERA':
+        return cam_obj
+    return None
 
 # --- LOGIC ---
 
 def convert_max_empties_logic(context):
     """
-    Finds 3ds Max style Parent-Target Empty hierarchies and converts them 
-    to Blender Cameras with Track To and Limit Rotation constraints.
+    Detects 3ds Max style 'Parent' and '.Target' Empty pairs and converts 
+    them into Blender Cameras with tracking.
     """
     selected_objects = context.selected_objects
     # Filter for base empties (avoiding .Target objects as bases)
@@ -64,17 +82,8 @@ def convert_max_empties_logic(context):
             tt.target = new_target
             tt.track_axis = 'TRACK_NEGATIVE_Z'
             tt.up_axis = 'UP_Y'
-
-            # Limit Rotation to fix vertical tilt (Archviz style)
-            lr = cam_obj.constraints.new(type='LIMIT_ROTATION')
-            lr.name = "P_ARCH_Vertical_Fix"
-            lr.use_limit_x = True
-            lr.min_x = math.radians(90)
-            lr.max_x = math.radians(90)
-            lr.use_limit_y = True
-            lr.min_y = 0
-            lr.max_y = 0
-            lr.owner_space = 'WORLD'
+            
+            # NOTE: Limit Rotation is omitted to allow modular Two-Point Perspective tool usage.
             
             # Set the first created camera as active for the scene
             if created_count == 0:
@@ -84,41 +93,163 @@ def convert_max_empties_logic(context):
             
     return created_count
 
+def apply_two_point_perspective_logic(context):
+    """
+    Aligns camera to exactly vertical (90deg X) while maintaining the visual 
+    composition using shift_y. Uses reference core.py math.
+    """
+    cam_obj = get_active_camera(context)
+    if not cam_obj:
+        return False, "No camera selected"
+    
+    scene = context.scene
+    cam = cam_obj.data
+    
+    # Preserve active object state while baking
+    old_active = context.view_layer.objects.active
+    context.view_layer.objects.active = cam_obj
+    
+    # Bake constraints (Track To) into the actual location/rotation
+    bpy.ops.object.visual_transform_apply()
+    
+    # Temporarily mute constraints so they don't override manual alignment
+    for const in cam_obj.constraints:
+        if const.type in {'TRACK_TO', 'LIMIT_ROTATION'}:
+            const.mute = True
+
+    # --- Perspective Math ---
+    cam_obj.rotation_mode = "XYZ"
+    cam_rotation = cam_obj.rotation_euler.copy()
+    cam_position = cam_obj.location.copy()
+    
+    focal_length = cam.lens
+    ratio = scene.render.resolution_x / scene.render.resolution_y
+    
+    if cam.sensor_fit == "HORIZONTAL" or (cam.sensor_fit == "AUTO" and ratio >= 1):
+        sensor_size = cam.sensor_width
+    else:
+        sensor_size = cam.sensor_height
+
+    # Correct rotation to the nearest 90deg horizontal axis
+    corrected_rotation = nearest_quarter(cam_rotation[0])
+    
+    # Trigonometry for shift and pivot compensation
+    angle = corrected_rotation - cam_rotation[0]
+    if abs(math.cos(angle)) < 0.001:
+        return False, "Camera angle too extreme"
+        
+    adjacent_side = focal_length / sensor_size
+    opposite_side = -math.tan(angle) * adjacent_side
+    offset = (adjacent_side / math.cos(angle)) - adjacent_side
+    
+    # Transform local Z-offset to world space using reference logic (Row-Vector @ Inv Matrix)
+    offset_vec = Vector((0, 0, offset))
+    inv_world_matrix = cam_obj.matrix_world.copy().inverted()
+    rotated_offset_vec = offset_vec @ inv_world_matrix
+    
+    # Apply changes directly to object transform and camera data
+    cam_obj.location = cam_position + rotated_offset_vec
+    cam_obj.rotation_euler[0] = corrected_rotation
+    cam.shift_y += opposite_side
+    
+    # Restore viewport context
+    context.view_layer.objects.active = old_active
+    return True, ""
+
+def reset_perspective_logic(context):
+    """Undoes perspective correction by zeroing shift and re-enabling tracking."""
+    cam_obj = get_active_camera(context)
+    if not cam_obj:
+        return False, "No camera selected"
+    
+    cam_obj.data.shift_y = 0
+    
+    # Restore constraints (like Track To)
+    for const in cam_obj.constraints:
+        if const.type in {'TRACK_TO', 'LIMIT_ROTATION'}:
+            const.mute = False
+            
+    return True, ""
+
 # --- OPERATORS ---
 
 class PM_OT_ConvertMaxEmpties(bpy.types.Operator):
-    """Detects 3ds Max style 'Parent' and '.Target' Empty pairs and converts 
-    them into Blender Cameras with tracking and vertical tilt fixes"""
+    """Converts 3ds Max style Empty targets to Blender Cameras"""
     bl_idname = "pm.convert_max_empties"
     bl_label = "Max Empties to Cameras"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        # Only active if Empties are selected
         return any(obj.type == 'EMPTY' for obj in context.selected_objects)
 
     def execute(self, context):
         count = convert_max_empties_logic(context)
         if count == 0:
-            self.report({'WARNING'}, "No suitable Empties selected (Parent-Target pairs)")
+            self.report({'WARNING'}, "No suitable Empties selected")
             return {'CANCELLED'}
         
-        self.report({'INFO'}, f"Successfully created {count} cameras")
+        self.report({'INFO'}, f"Created {count} cameras")
         return {'FINISHED'}
+
+class PM_OT_ApplyTwoPointPerspective(bpy.types.Operator):
+    """Calculates shift_y for vertical alignment (Archviz 2-point perspective)"""
+    bl_idname = "pm.apply_two_point_perspective"
+    bl_label = "Two-Point Perspective"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return get_active_camera(context) is not None
+
+    def execute(self, context):
+        success, message = apply_two_point_perspective_logic(context)
+        if success:
+            self.report({'INFO'}, "Applied Two-Point Perspective")
+            return {'FINISHED'}
+        
+        self.report({'ERROR'}, message if message else "Failed to apply correction")
+        return {'CANCELLED'}
+
+class PM_OT_ResetPerspective(bpy.types.Operator):
+    """Zeros shift and restores constraint tracking"""
+    bl_idname = "pm.reset_perspective"
+    bl_label = "Reset Perspective"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        cam_obj = get_active_camera(context)
+        # Only active if shift_y is not zero (has perspective correction applied)
+        return cam_obj is not None and abs(cam_obj.data.shift_y) > 0.00001
+
+    def execute(self, context):
+        success, message = reset_perspective_logic(context)
+        if success:
+            self.report({'INFO'}, "Perspective Reset")
+            return {'FINISHED'}
+            
+        self.report({'ERROR'}, message if message else "Failed to reset")
+        return {'CANCELLED'}
 
 # --- UI DRAWING ---
 
-def draw_ui(layout):
+def draw_ui(layout, context):
     box = layout.box()
     box.label(text="MaxCamera Converter", icon='CAMERA_DATA')
-    # Refined icon to CAMERA_STEREO for 'pair' conversion feel
+    
     box.operator("pm.convert_max_empties", text="Convert Selected Empties", icon='CAMERA_STEREO')
+    
+    row = box.row(align=True)
+    row.operator("pm.apply_two_point_perspective", text="Two-Point", icon='ORIENTATION_VIEW')
+    row.operator("pm.reset_perspective", text="Reset", icon='X')
 
 # --- REGISTRATION ---
 
 classes = (
     PM_OT_ConvertMaxEmpties,
+    PM_OT_ApplyTwoPointPerspective,
+    PM_OT_ResetPerspective,
 )
 
 def register():

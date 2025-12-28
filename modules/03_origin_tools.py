@@ -71,7 +71,7 @@ class PM_OT_BottomOrigin(bpy.types.Operator):
 
 # --- UI DRAWING ---
 
-def draw_ui(layout):
+def draw_ui(layout, context):
     box = layout.box()
     box.label(text="Origin Tools", icon='OBJECT_ORIGIN')
     row = box.row(align=True)
