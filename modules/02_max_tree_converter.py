@@ -309,6 +309,8 @@ class PM_PT_MaxTreeSettings(bpy.types.Panel):
     bl_idname = "PM_PT_maxtree_settings"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
+    # Removing bl_category and adding HIDE_HEADER to keep it out of the N-Panel list
+    bl_options = {'HIDE_HEADER'}
 
     def draw(self, context):
         layout = self.layout
