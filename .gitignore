@@ -1,21 +1,7 @@
-# Python junk
+# Addon specific
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
 
-# OS junk
-.DS_Store
-Thumbs.db
-
-# VS Code settings
-.vscode/
-
-# Blender backup files
-*.blend1
-*.blend2
-*.blend3
-
-# Templates
-module_template.py
-
-legacy/
+# Tests (Internal Use)
+tests/
+run_tests.bat
