@@ -6,27 +6,32 @@ UI_CATEGORY = "SCENE_OPTIMIZATION"
 # --- LOGIC ---
 
 def mesh_to_ic_logic(context):
-    """Converts selected meshes to collection instances (IC)."""
-    selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-    if not selected_objects:
-        return "No mesh objects selected"
+    """
+    Converts selected meshes to collection instances (IC).
+    Uses the collection from the active object (expected to be an instance collection).
+    """
+    active_obj = context.active_object
+    if not active_obj or active_obj.instance_type != 'COLLECTION' or not active_obj.instance_collection:
+        return "Active object must be a Collection Instance"
 
-    for obj in selected_objects:
-        mesh_data = obj.data
-        col_name = f"IC_{mesh_data.name}"
-        
-        ic_collection = bpy.data.collections.get(col_name)
-        if not ic_collection:
-            ic_collection = bpy.data.collections.new(col_name)
-            context.scene.collection.children.link(ic_collection)
-            ic_collection.objects.link(bpy.data.objects.new(mesh_data.name, mesh_data))
-        
+    ic_collection = active_obj.instance_collection
+    
+    # Filter meshes to replace, excluding the active object itself
+    selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH' and obj != active_obj]
+    
+    if not selected_meshes:
+        return "No mesh objects selected to replace"
+
+    for obj in selected_meshes:
         instance = bpy.data.objects.new(f"Inst_{obj.name}", None)
         instance.instance_type = 'COLLECTION'
         instance.instance_collection = ic_collection
-        instance.matrix_world = obj.matrix_world
+        instance.matrix_world = obj.matrix_world.copy()
         
-        context.collection.objects.link(instance)
+        # Link to the same collection as the original object
+        for col in obj.users_collection:
+            col.objects.link(instance)
+            
         bpy.data.objects.remove(obj, do_unlink=True)
         
     return None
