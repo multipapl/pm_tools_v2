@@ -18,9 +18,10 @@ loaded_modules = []
 
 class PM_UI_State(bpy.types.PropertyGroup):
     """Property group for tracking UI state (expanded/collapsed)"""
-    show_converters: bpy.props.BoolProperty(name="Converters", default=True)
-    show_management: bpy.props.BoolProperty(name="Scene Management", default=True)
+    show_converters: bpy.props.BoolProperty(name="Converters", default=False)
+    show_management: bpy.props.BoolProperty(name="Scene Management", default=False)
     show_optimization: bpy.props.BoolProperty(name="Scene Optimization", default=True)
+    show_material_override: bpy.props.BoolProperty(name="Material Override", default=False)
     show_other: bpy.props.BoolProperty(name="Other Tools", default=False)
 
 # --- UI PANEL ---
@@ -42,6 +43,7 @@ class PM_PT_MainPanel(bpy.types.Panel):
             "CONVERTERS": [],
             "SCENE_MANAGEMENT": [],
             "SCENE_OPTIMIZATION": [],
+            "MATERIAL_OVERRIDE": [],
             "OTHER": []
         }
         
@@ -57,7 +59,17 @@ class PM_PT_MainPanel(bpy.types.Panel):
             "CONVERTERS": ("CONVERTERS", "show_converters"),
             "SCENE_MANAGEMENT": ("SCENE MANAGEMENT", "show_management"),
             "SCENE_OPTIMIZATION": ("SCENE OPTIMIZATION", "show_optimization"),
+            "MATERIAL_OVERRIDE": ("MATERIAL OVERRIDE", "show_material_override"),
             "OTHER": ("OTHER TOOLS", "show_other")
+        }
+
+        # Icon Mapping for Categories
+        CATEGORY_ICONS = {
+            "CONVERTERS": "DRIVER",             # Technical/Logic feel
+            "SCENE MANAGEMENT": "SCENE_DATA",   # Standard Scene icon
+            "SCENE OPTIMIZATION": "MODIFIER",   # Modifiers/Tweaks
+            "MATERIAL OVERRIDE": "SHADING_RENDERED", # Visual/Shading
+            "OTHER TOOLS": "PREFERENCES" # Using "OTHER TOOLS" to match the title in category_map
         }
         
         for cat_id, modules in categories.items():
@@ -72,9 +84,13 @@ class PM_PT_MainPanel(bpy.types.Panel):
             row = box.row(align=True)
             
             # Customizing the header with a toggle
-            icon = 'TRIA_DOWN' if is_expanded else 'TRIA_RIGHT'
-            row.prop(ui_state, prop_name, text="", icon=icon, emboss=False)
-            row.label(text=title, icon='PREFERENCES')
+            icon_state = 'TRIA_DOWN' if is_expanded else 'TRIA_RIGHT'
+            
+            # Get the specific icon for the category, fallback to PREFERENCES
+            category_icon = CATEGORY_ICONS.get(title, "PREFERENCES")
+
+            row.prop(ui_state, prop_name, text="", icon=icon_state, emboss=False)
+            row.label(text=title, icon=category_icon) # Use the specific category icon
             
             if is_expanded:
                 for module in modules:
