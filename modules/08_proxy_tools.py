@@ -1,6 +1,7 @@
 import bpy
 import os
-import mathutils
+
+from ..selection_targets import get_active_target_objects, get_selected_target_objects
 
 UI_CATEGORY = "SCENE_OPTIMIZATION"
 
@@ -12,8 +13,13 @@ def get_socket_identifier(node_group, socket_name):
     Supports Blender 4.0+ interface API and older inputs/outputs lists.
     """
     if hasattr(node_group, "interface"):
-        for item in node_group.interface.items:
-            if item.item_type == 'INPUT' and item.name == socket_name:
+        items = getattr(node_group.interface, "items_tree", None) or getattr(node_group.interface, "items", None)
+        for item in items:
+            if getattr(item, "item_type", None) not in {'INPUT', 'SOCKET'}:
+                continue
+            if getattr(item, "in_out", 'INPUT') != 'INPUT':
+                continue
+            if item.name == socket_name:
                 return item.identifier
     elif hasattr(node_group, "inputs"):
         for input_socket in node_group.inputs:
@@ -21,18 +27,30 @@ def get_socket_identifier(node_group, socket_name):
                 return input_socket.identifier
     return None
 
+
+def get_proxy_targets(context):
+    return get_selected_target_objects(context)
+
+
+def get_active_proxy_source(context):
+    for obj in get_active_target_objects(context):
+        if obj.type == 'MESH' and "Proxy" in obj.modifiers:
+            return obj
+    return None
+
 def sync_proxy_param(settings, context, socket_name, prop_name, forced_id=None):
     """
     Synchronizes a PropertyGroup property with Geometry Nodes modifier inputs.
-    Updates all selected mesh objects containing a 'Proxy' modifier.
+    Updates all resolved target mesh objects containing a 'Proxy' modifier.
     Only proceeds if there is a valid selection.
     """
-    if not context or not context.selected_objects or getattr(settings, "is_fetching", False):
+    target_objects = get_proxy_targets(context)
+    if not context or not target_objects or getattr(settings, "is_fetching", False):
         return
         
     prop_value = getattr(settings, prop_name)
 
-    for obj in context.selected_objects:
+    for obj in target_objects:
         if obj.type == 'MESH' and "Proxy" in obj.modifiers:
             mod = obj.modifiers["Proxy"]
             if mod.type == 'NODES' and mod.node_group:
@@ -48,9 +66,10 @@ def sync_proxy_param(settings, context, socket_name, prop_name, forced_id=None):
 def sync_proxy_color_all_channels(settings, context):
     """
     Synchronizes the proxy color across Material, Object, and Geometry Nodes.
-    Only proceeds if there is a valid selection to prevent inconsistent global state.
+    Works on resolved target meshes from the current selection.
     """
-    if not context or not context.selected_objects or getattr(settings, "is_fetching", False):
+    target_objects = get_proxy_targets(context)
+    if not context or not target_objects or getattr(settings, "is_fetching", False):
         return
         
     color = settings.proxy_color
@@ -66,7 +85,7 @@ def sync_proxy_color_all_channels(settings, context):
                     node.inputs["Base Color"].default_value = color_rgba
 
     # 2. Sync Selected Objects (Object Color + GN Input)
-    for obj in context.selected_objects:
+    for obj in target_objects:
         if obj.type == 'MESH' and "Proxy" in obj.modifiers:
             # Update Object Viewport Color
             obj.color = color_rgba
@@ -74,9 +93,7 @@ def sync_proxy_color_all_channels(settings, context):
             # Update GN Input
             mod = obj.modifiers["Proxy"]
             if mod.type == 'NODES' and mod.node_group:
-                target_id = "Input_12"
-                if target_id not in mod:
-                    target_id = get_socket_identifier(mod.node_group, "Proxy color")
+                target_id = get_socket_identifier(mod.node_group, "Proxy color") or "Input_12"
                 
                 if target_id and target_id in mod:
                     try:
@@ -159,18 +176,18 @@ def get_proxy_node_group():
 # --- OPERATORS ---
 
 class PM_OT_AddProxyModifier(bpy.types.Operator):
-    """Applies the documentation-compliant Proxy modifier to selected meshes."""
+    """Applies the documentation-compliant Proxy modifier to resolved selection targets."""
     bl_idname = "pm.add_proxy_modifier"
     bl_label = "Add Proxy"
-    bl_description = "Add a Geometry Nodes based Proxy modifier to selected meshes"
+    bl_description = "Add a Geometry Nodes based Proxy modifier to selected meshes and collection instances"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return context.selected_objects and any(obj.type == 'MESH' for obj in context.selected_objects)
+        return bool(get_proxy_targets(context))
 
     def execute(self, context):
-        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        selected_meshes = get_proxy_targets(context)
         node_group = get_proxy_node_group()
         
         if not node_group:
@@ -189,9 +206,7 @@ class PM_OT_AddProxyModifier(bpy.types.Operator):
                 
                 # Apply initial synchronization
                 obj.color = color_rgba
-                target_id = "Input_12"
-                if target_id not in mod:
-                    target_id = get_socket_identifier(node_group, "Proxy color")
+                target_id = get_socket_identifier(node_group, "Proxy color") or "Input_12"
                     
                 if target_id and target_id in mod:
                     try: mod[target_id] = color_rgba
@@ -208,28 +223,32 @@ class PM_OT_ToggleProxy(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return any("Proxy" in obj.modifiers for obj in context.selected_objects)
+        return any("Proxy" in obj.modifiers for obj in get_proxy_targets(context))
 
     def execute(self, context):
-        for obj in context.selected_objects:
-            if "Proxy" in obj.modifiers:
-                mod = obj.modifiers["Proxy"]
-                mod.show_viewport = not mod.show_viewport
+        target_objects = [obj for obj in get_proxy_targets(context) if "Proxy" in obj.modifiers]
+        if not target_objects:
+            self.report({'WARNING'}, "No Proxy modifiers found in the current selection")
+            return {'CANCELLED'}
+
+        target_state = not all(obj.modifiers["Proxy"].show_viewport for obj in target_objects)
+        for obj in target_objects:
+            obj.modifiers["Proxy"].show_viewport = target_state
         return {'FINISHED'}
 
 class PM_OT_CopyProxySettings(bpy.types.Operator):
     """Copies settings from the active object's Proxy to all selected objects."""
     bl_idname = "pm.copy_proxy_settings"
     bl_label = "Copy from Active"
-    bl_description = "Copy Density, Size, and Color from the active object and apply to all selected mesh objects"
+    bl_description = "Copy Density, Size, and Color from the active target and apply to all selected targets"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return context.active_object and "Proxy" in context.active_object.modifiers
+        return get_active_proxy_source(context) is not None
 
     def execute(self, context):
-        active_obj = context.active_object
+        active_obj = get_active_proxy_source(context)
         mod = active_obj.modifiers.get("Proxy")
         if not mod or not mod.node_group:
             self.report({'ERROR'}, "Active object has no 'Proxy' modifier")

@@ -3,6 +3,7 @@ import os
 
 # --- 1. CONSTANTS & CONFIGURATION ---
 UI_CATEGORY = "MATERIAL_OVERRIDE"
+UI_HIDDEN = True
 NODE_GROUP_NAME = "PAPL_MaterialOverride"
 ASSET_FILENAME = "node_library.blend"
 OVERRIDE_NODE_NAME = "PAPL_Override_Instance"
