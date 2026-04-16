@@ -73,30 +73,7 @@ def defuck_lights_logic(context):
             count += 1
     return count
 
-def cleanup_material_duplicates_logic(context):
-    """Finds and replaces material duplicates (e.g. Mat.001 -> Mat)."""
-    pattern = re.compile(r"^(.*)\.(\d{3})$")
-    replacements = {}
-    
-    selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
-    
-    for obj in selected_meshes:
-        for mat in obj.data.materials:
-            if mat:
-                match = pattern.match(mat.name)
-                if match:
-                    base_name = match.group(1)
-                    master_mat = bpy.data.materials.get(base_name)
-                    if master_mat:
-                        replacements[mat.name] = master_mat
-                                            
-    count = 0
-    for obj in selected_meshes:
-        for i, mat in enumerate(obj.data.materials):
-            if mat and mat.name in replacements:
-                obj.data.materials[i] = replacements[mat.name]
-                count += 1
-    return count
+
 
 # --- OPERATORS ---
 
@@ -203,3 +180,27 @@ def register():
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+def cleanup_material_duplicates_logic(context):
+    """Finds and replaces material duplicates (e.g. Mat.001 -> Mat)."""
+    pattern = re.compile(r"^(.*)\.(\d{3})$")
+    replacements = {}
+    
+    selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+    
+    for obj in selected_meshes:
+        for mat in obj.data.materials:
+            if mat:
+                match = pattern.match(mat.name)
+                if match:
+                    base_name = match.group(1)
+                    master_mat = bpy.data.materials.get(base_name)
+                    if master_mat:
+                        replacements[mat.name] = master_mat
+                                            
+    count = 0
+    for obj in selected_meshes:
+        for i, mat in enumerate(obj.data.materials):
+            if mat and mat.name in replacements:
+                obj.data.materials[i] = replacements[mat.name]
+                count += 1
+    return count
