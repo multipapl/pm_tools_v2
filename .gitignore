@@ -1,6 +1,7 @@
 # Addon specific
 __pycache__/
 *.pyc
+.vscode/
 
 # Tests (Internal Use)
 tests/
