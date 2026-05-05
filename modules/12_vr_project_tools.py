@@ -363,7 +363,7 @@ class PM_OT_VR_AuditObjectPrep(bpy.types.Operator):
     bl_description = "Check object-based Scale Immersive naming, material, and UV requirements"
     bl_options = {'REGISTER'}
 
-    scope: bpy.props.EnumProperty(
+    scope: bpy.props.EnumProperty(  # type: ignore[reportInvalidTypeForm]
         name="Scope",
         items=(
             ('SELECTED', "Selected", "Only selected mesh targets"),
@@ -401,7 +401,7 @@ class PM_OT_VR_SyncNamesFromObjects(bpy.types.Operator):
     bl_description = "Copy each object name to its mesh data-block and single material"
     bl_options = {'REGISTER', 'UNDO'}
 
-    scope: bpy.props.EnumProperty(
+    scope: bpy.props.EnumProperty(  # type: ignore[reportInvalidTypeForm]
         name="Scope",
         items=(
             ('SELECTED', "Selected", "Only selected mesh targets"),
@@ -446,7 +446,7 @@ class PM_OT_VR_CheckUVChannels(bpy.types.Operator):
     bl_description = "Force exact UVMap and SimpleBake channels, copying UVMap coordinates to SimpleBake"
     bl_options = {'REGISTER', 'UNDO'}
 
-    scope: bpy.props.EnumProperty(
+    scope: bpy.props.EnumProperty(  # type: ignore[reportInvalidTypeForm]
         name="Scope",
         items=(
             ('SELECTED', "Selected", "Only selected mesh targets"),
@@ -472,7 +472,7 @@ class PM_OT_VR_SelectAuditIssue(bpy.types.Operator):
     bl_description = "Select objects that match one Scale Immersive audit issue"
     bl_options = {'REGISTER'}
 
-    issue: bpy.props.EnumProperty(
+    issue: bpy.props.EnumProperty(  # type: ignore[reportInvalidTypeForm]
         name="Issue",
         items=(
             ('BAD_NAMES', "Bad Names", "Object names that are not PascalCase or still have .001 suffixes"),
