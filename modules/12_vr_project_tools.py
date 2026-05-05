@@ -1,3 +1,4 @@
+import math
 import os
 import re
 
@@ -545,6 +546,208 @@ class PM_OT_VR_SelectMissingTextures(bpy.types.Operator):
         return {'FINISHED'}
 
 
+TARGET_TD_PX_PER_CM = 10.0
+TEXTURE_OPTIONS = {
+    "1K": 1024,
+    "2K": 2048,
+    "4K": 4096,
+}
+CM_PER_BLEND_UNIT = 100.0
+
+TD_SUFFIX_PATTERN = re.compile(r"_(1K|2K|4K)$")
+
+
+def remove_td_suffix(name):
+    return TD_SUFFIX_PATTERN.sub("", name)
+
+
+def polygon_area_2d(points):
+    if len(points) < 3:
+        return 0.0
+    area = 0.0
+    for i in range(len(points)):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % len(points)]
+        area += x1 * y2 - x2 * y1
+    return abs(area) * 0.5
+
+
+def triangle_area_3d(a, b, c):
+    return ((b - a).cross(c - a)).length * 0.5
+
+
+def get_mesh_areas(obj):
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    obj_eval = obj.evaluated_get(depsgraph)
+    mesh = obj_eval.to_mesh()
+
+    try:
+        if not mesh.polygons:
+            return 0.0, 0.0, "no polygons"
+
+        uv_layer = mesh.uv_layers.get(SIMPLE_BAKE_UV_NAME)
+        if uv_layer is None:
+            return 0.0, 0.0, f'UV channel "{SIMPLE_BAKE_UV_NAME}" not found'
+
+        world_area_bu2 = 0.0
+        uv_area = 0.0
+        mw = obj.matrix_world
+
+        for poly in mesh.polygons:
+            loop_indices = poly.loop_indices
+            if len(loop_indices) < 3:
+                continue
+
+            verts_world = [
+                mw @ mesh.vertices[mesh.loops[i].vertex_index].co
+                for i in loop_indices
+            ]
+            v0 = verts_world[0]
+            for i in range(1, len(verts_world) - 1):
+                world_area_bu2 += triangle_area_3d(
+                    v0, verts_world[i], verts_world[i + 1]
+                )
+
+            uvs = [uv_layer.data[i].uv.copy() for i in loop_indices]
+            uv_area += polygon_area_2d(uvs)
+
+        mesh_area_cm2 = world_area_bu2 * (CM_PER_BLEND_UNIT ** 2)
+        return mesh_area_cm2, uv_area, None
+    finally:
+        obj_eval.to_mesh_clear()
+
+
+def choose_texture_suffix(uv_area, mesh_area_cm2):
+    if mesh_area_cm2 <= 0.0 or uv_area <= 0.0:
+        return "4K", {}
+
+    td_results = {}
+    for suffix, size in TEXTURE_OPTIONS.items():
+        td_results[suffix] = size * math.sqrt(uv_area / mesh_area_cm2)
+
+    for suffix, size in sorted(TEXTURE_OPTIONS.items(), key=lambda item: item[1]):
+        if td_results[suffix] >= TARGET_TD_PX_PER_CM:
+            return suffix, td_results
+
+    return "4K", td_results
+
+
+class PM_OT_VR_AddTextureSuffix(bpy.types.Operator):
+    bl_idname = "pm_vr.add_texture_suffix"
+    bl_label = "Add Texture Suffix"
+    bl_description = (
+        "Append _1K/_2K/_4K suffix based on texel density target "
+        f"({TARGET_TD_PX_PER_CM} px/cm, UV: {SIMPLE_BAKE_UV_NAME})"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected = [
+            obj for obj in get_selected_target_objects(context)
+            if obj.type == 'MESH'
+        ]
+        if not selected:
+            self.report({'WARNING'}, "No selected mesh objects found")
+            return {'CANCELLED'}
+
+        renamed = 0
+        skipped = 0
+
+        for obj in selected:
+            mesh_area_cm2, uv_area, error = get_mesh_areas(obj)
+            if error:
+                skipped += 1
+                print(f"[PM Tools][VR Project] SKIPPED {obj.name}: {error}")
+                continue
+
+            suffix, td_results = choose_texture_suffix(uv_area, mesh_area_cm2)
+            base_name = remove_td_suffix(obj.name)
+            new_name = f"{base_name}_{suffix}"
+            obj.name = new_name
+            renamed += 1
+
+            print(
+                f"[PM Tools][VR Project] {base_name} -> {new_name} | "
+                f"Area: {mesh_area_cm2:.1f} cm\u00b2 | "
+                f"TD 1K: {td_results.get('1K', 0):.1f}  "
+                f"2K: {td_results.get('2K', 0):.1f}  "
+                f"4K: {td_results.get('4K', 0):.1f} px/cm"
+            )
+
+        msg = f"Renamed {renamed} object(s)"
+        if skipped:
+            msg += f", skipped {skipped}"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+class PM_OT_VR_ActivateUVMap(bpy.types.Operator):
+    bl_idname = "pm_vr.activate_uvmap"
+    bl_label = "Activate UVMap"
+    bl_description = "Set first UV layer (UVMap) as active and renderable on selected meshes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected = [
+            obj for obj in get_selected_target_objects(context)
+            if obj.type == 'MESH'
+        ]
+        if not selected:
+            self.report({'WARNING'}, "No selected mesh objects found")
+            return {'CANCELLED'}
+
+        count = 0
+        for obj in selected:
+            if not obj.data or not obj.data.uv_layers:
+                continue
+            layers = obj.data.uv_layers
+            target = layers.get(PRIMARY_UV_NAME) or layers[0]
+            layers.active = target
+            for layer in layers:
+                layer.active_render = (layer == target)
+            count += 1
+
+        self.report({'INFO'}, f"Activated UVMap on {count} object(s)")
+        return {'FINISHED'}
+
+
+class PM_OT_VR_ActivateSimpleBake(bpy.types.Operator):
+    bl_idname = "pm_vr.activate_simplebake"
+    bl_label = "Activate SimpleBake"
+    bl_description = "Set SimpleBake UV layer as active and renderable on selected meshes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected = [
+            obj for obj in get_selected_target_objects(context)
+            if obj.type == 'MESH'
+        ]
+        if not selected:
+            self.report({'WARNING'}, "No selected mesh objects found")
+            return {'CANCELLED'}
+
+        count = 0
+        missing = 0
+        for obj in selected:
+            if not obj.data or not obj.data.uv_layers:
+                continue
+            layers = obj.data.uv_layers
+            target = layers.get(SIMPLE_BAKE_UV_NAME)
+            if not target:
+                missing += 1
+                continue
+            layers.active = target
+            for layer in layers:
+                layer.active_render = (layer == target)
+            count += 1
+
+        msg = f"Activated SimpleBake on {count} object(s)"
+        if missing:
+            msg += f", {missing} without SimpleBake layer"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
 def draw_ui(layout, context):
     box = layout.box()
     box.label(text="Scale Immersive Prep", icon='WORLD')
@@ -592,12 +795,16 @@ def draw_ui(layout, context):
     op.scope = 'SELECTED'
     op = row.operator(PM_OT_VR_CheckUVChannels.bl_idname, text="Check UV All", icon='GROUP_UVS')
     op.scope = 'ALL'
+    row = uv_col.row(align=True)
+    row.operator(PM_OT_VR_ActivateUVMap.bl_idname, text="Activate UVMap", icon='GROUP_UVS')
+    row.operator(PM_OT_VR_ActivateSimpleBake.bl_idname, text="Activate SimpleBake", icon='GROUP_UVS')
 
     box.separator()
 
     texture_col = box.column(align=True)
     texture_col.label(text="Textures:")
     texture_col.operator(PM_OT_VR_SelectMissingTextures.bl_idname, text="Missing Textures", icon='ERROR')
+    texture_col.operator(PM_OT_VR_AddTextureSuffix.bl_idname, text="Add Texel Suffix", icon='TEXTURE')
 
 
 classes = (
@@ -607,6 +814,9 @@ classes = (
     PM_OT_VR_SelectAuditIssue,
     PM_OT_VR_SelectReservedKeywords,
     PM_OT_VR_SelectMissingTextures,
+    PM_OT_VR_AddTextureSuffix,
+    PM_OT_VR_ActivateUVMap,
+    PM_OT_VR_ActivateSimpleBake,
 )
 
 
