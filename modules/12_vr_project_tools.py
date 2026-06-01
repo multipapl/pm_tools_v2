@@ -1,6 +1,7 @@
 import math
 import os
 import re
+import shutil
 
 import bpy
 
@@ -10,15 +11,21 @@ UI_CATEGORY = "VR_PROJECT"
 
 PRIMARY_UV_NAME = "UVMap"
 SIMPLE_BAKE_UV_NAME = "SimpleBake"
+EXTERNAL_TEXTURE_FOLDER_NAME = "PM_Selected_Textures"
+TEXTURE_FILE_EXTENSIONS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".exr",
+    ".bmp",
+    ".tga",
+    ".hdr",
+    ".webp",
+)
 BLENDER_DUPLICATE_SUFFIX_PATTERN = re.compile(r"^(.*)\.(\d{3})$")
 PASCAL_CASE_PATTERN = re.compile(r"^[A-Z][A-Za-z0-9]*$")
-RESERVED_KEYWORDS = {
-    "Glass": ("glass", "window", "windows", "lens", "lenses"),
-    "Foliage": ("leaf",),
-    "Stitching": ("stitch", "stitches", "stitching", "seam", "thread"),
-    "Blackout": ("blackout", "blackoff", "black_out", "black_off", "blackscreen", "black_screen"),
-    "Metal": ("metal",),
-}
 
 
 def iter_scope_objects(context, scope):
@@ -38,6 +45,19 @@ def count_material_object_users(material):
             continue
         if any(slot.material == material for slot in obj.material_slots):
             users += 1
+    return users
+
+
+def get_material_object_users(material):
+    if not material:
+        return []
+
+    users = []
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or not obj.data:
+            continue
+        if any(slot.material == material for slot in obj.material_slots):
+            users.append(obj)
     return users
 
 
@@ -85,54 +105,202 @@ def iter_material_image_nodes(material):
             yield node, node.image
 
 
-def image_path_missing(image):
-    if not image or image.packed_file:
+def iter_material_base_color_image_nodes(material):
+    if not material or not material.use_nodes or not material.node_tree:
+        return
+
+    seen_nodes = set()
+    for node in material.node_tree.nodes:
+        if node.type != 'BSDF_PRINCIPLED':
+            continue
+
+        base_color_input = node.inputs.get("Base Color")
+        if not base_color_input or not base_color_input.is_linked:
+            continue
+
+        for link in base_color_input.links:
+            from_node = link.from_node
+            if from_node and from_node.type == 'TEX_IMAGE' and getattr(from_node, "image", None):
+                key = from_node.as_pointer()
+                if key in seen_nodes:
+                    continue
+                seen_nodes.add(key)
+                yield from_node, from_node.image
+
+
+def get_image_extension(image):
+    filepath = getattr(image, "filepath", "") or ""
+    extension = os.path.splitext(filepath)[1].lower()
+    if extension:
+        return extension
+
+    file_format = getattr(image, "file_format", "") or ""
+    if file_format:
+        return f".{file_format.lower()}"
+    return ""
+
+
+def get_image_file_basename(image):
+    filepath = getattr(image, "filepath", "") or ""
+    if filepath:
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+        if base_name:
+            return base_name
+
+    image_name = getattr(image, "name", "") or ""
+    base_name = os.path.splitext(image_name)[0]
+    return base_name or image_name
+
+
+def sanitize_filename_component(value):
+    sanitized = re.sub(r'[\\/:*?"<>|]+', "_", value or "")
+    sanitized = sanitized.strip(" ._")
+    return sanitized or "Texture"
+
+
+def make_image_filepath_for_blender(absolute_path):
+    if bpy.data.filepath:
+        try:
+            return bpy.path.relpath(absolute_path)
+        except ValueError:
+            return absolute_path
+    return absolute_path
+
+
+def get_image_absolute_path(image):
+    filepath = getattr(image, "filepath", "") or ""
+    if not filepath:
+        return ""
+    return bpy.path.abspath(filepath, library=getattr(image, "library", None))
+
+
+def build_texture_directory_index(directory):
+    texture_paths = {}
+    duplicates = set()
+
+    for name in os.listdir(directory):
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+
+        base_name, extension = os.path.splitext(name)
+        if extension.lower() not in TEXTURE_FILE_EXTENSIONS:
+            continue
+
+        key = base_name.lower()
+        if key in texture_paths:
+            duplicates.add(key)
+            continue
+        texture_paths[key] = path
+
+    for key in duplicates:
+        texture_paths.pop(key, None)
+
+    return texture_paths, duplicates
+
+
+def get_matching_texture_path(image, texture_paths):
+    key = get_image_file_basename(image).lower()
+    return texture_paths.get(key)
+
+
+def load_image_replacement(filepath, color_space):
+    try:
+        image = bpy.data.images.load(filepath, check_existing=False)
+    except TypeError:
+        image = bpy.data.images.load(filepath)
+
+    image.colorspace_settings.name = color_space
+    image.filepath = make_image_filepath_for_blender(filepath)
+    return image
+
+
+def get_selected_texture_export_directory():
+    if not bpy.data.filepath:
+        return ""
+    return os.path.join(os.path.dirname(bpy.data.filepath), EXTERNAL_TEXTURE_FOLDER_NAME)
+
+
+def get_image_output_extension(image):
+    extension = get_image_extension(image).lower()
+    if extension:
+        return ".jpg" if extension == ".jpeg" else extension
+
+    file_format = getattr(image, "file_format", "") or ""
+    format_extensions = {
+        "JPEG": ".jpg",
+        "PNG": ".png",
+        "TIFF": ".tif",
+        "OPEN_EXR": ".exr",
+        "BMP": ".bmp",
+        "TARGA": ".tga",
+        "HDR": ".hdr",
+    }
+    return format_extensions.get(file_format, ".png")
+
+
+def build_unique_texture_output_path(image, output_dir, used_paths):
+    base_name = sanitize_filename_component(get_image_file_basename(image))
+    extension = get_image_output_extension(image)
+    target_path = os.path.join(output_dir, f"{base_name}{extension}")
+
+    suffix = 1
+    while target_path.lower() in used_paths or os.path.exists(target_path):
+        suffix += 1
+        target_path = os.path.join(output_dir, f"{base_name}_{suffix}{extension}")
+
+    used_paths.add(target_path.lower())
+    return target_path
+
+
+def write_packed_image_file(image, target_path):
+    packed_file = getattr(image, "packed_file", None)
+    packed_data = getattr(packed_file, "data", None)
+    if not packed_data:
         return False
-    if getattr(image, "source", None) not in {'FILE', 'SEQUENCE', 'MOVIE', 'TILED'}:
-        return False
-    if not image.filepath:
-        return False
 
-    filepath = bpy.path.abspath(image.filepath, library=getattr(image, "library", None))
-    return not os.path.exists(filepath)
+    with open(target_path, "wb") as output_file:
+        output_file.write(bytes(packed_data))
+    return True
 
 
-def get_objects_with_missing_textures(objects):
-    problem_objects = []
-    for obj in objects:
-        found = False
-        for material in iter_object_materials(obj):
-            for _node, image in iter_material_image_nodes(material):
-                if image_path_missing(image):
-                    found = True
-                    break
-            if found:
-                break
-        if found:
-            problem_objects.append(obj)
-    return problem_objects
+def externalize_image_file(image, target_path):
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+    source_path = get_image_absolute_path(image)
+    if source_path and os.path.exists(source_path):
+        if os.path.abspath(source_path) != os.path.abspath(target_path):
+            shutil.copy2(source_path, target_path)
+        return
+
+    if write_packed_image_file(image, target_path):
+        return
+
+    image.save(filepath=target_path, save_copy=True)
 
 
-def get_reserved_keyword_matches(obj):
-    search_names = [obj.name]
-    search_names.extend(material.name for material in iter_object_materials(obj))
-    joined = " ".join(search_names).lower()
+def localize_materials_for_selected_objects(selected_objects, materials_to_localize):
+    selected_keys = {obj.as_pointer() for obj in selected_objects}
+    remap = {}
 
-    matches = []
-    for category, keywords in RESERVED_KEYWORDS.items():
-        matched_keywords = [keyword for keyword in keywords if keyword in joined]
-        if matched_keywords:
-            matches.append(f"{category}: {', '.join(matched_keywords)}")
-    return matches
+    for material in materials_to_localize:
+        users = get_material_object_users(material)
+        if any(obj.as_pointer() not in selected_keys for obj in users):
+            remap[material.as_pointer()] = material.copy()
 
+    if not remap:
+        return 0
 
-def get_objects_with_reserved_keywords(objects):
-    matches = []
-    for obj in objects:
-        categories = get_reserved_keyword_matches(obj)
-        if categories:
-            matches.append((obj, categories))
-    return matches
+    for obj in selected_objects:
+        for slot in obj.material_slots:
+            material = slot.material
+            if not material:
+                continue
+            replacement = remap.get(material.as_pointer())
+            if replacement:
+                slot.material = replacement
+
+    return len(remap)
 
 
 def ensure_single_material_from_object(obj):
@@ -311,26 +479,6 @@ def get_problem_objects(issues):
     return get_objects_from_issue_names(sorted(names))
 
 
-def get_issue_filter_objects(issues, filter_key):
-    if filter_key == 'BAD_NAMES':
-        names = issues["bad_object_names"]
-    elif filter_key == 'NAME_SYNC':
-        names = set(issues["shared_mesh_data"])
-        names.update(issues["mesh_name_mismatch"])
-        names.update(issues["material_name_mismatch"])
-        names = sorted(names)
-    elif filter_key == 'MATERIAL_COUNT':
-        names = issues["material_count"]
-    elif filter_key == 'SHARED_MATERIALS':
-        names = issues["shared_materials"]
-    elif filter_key == 'UV_CHANNELS':
-        names = issues["uv_channels"]
-    else:
-        names = []
-
-    return get_objects_from_issue_names(names)
-
-
 def select_scene_objects(context, objects):
     view_objects = {obj.as_pointer(): obj for obj in context.view_layer.objects}
     selectable = [view_objects[obj.as_pointer()] for obj in objects if obj.as_pointer() in view_objects]
@@ -466,83 +614,243 @@ class PM_OT_VR_CheckUVChannels(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class PM_OT_VR_SelectAuditIssue(bpy.types.Operator):
-    bl_idname = "pm_vr.select_audit_issue"
-    bl_label = "Select Audit Issue"
-    bl_description = "Select objects that match one Scale Immersive audit issue"
-    bl_options = {'REGISTER'}
+class PM_OT_VR_RelinkSelectedTexturesFromFolder(bpy.types.Operator):
+    bl_idname = "pm_vr.relink_selected_textures_from_folder"
+    bl_label = "Relink Selected Textures"
+    bl_description = (
+        "Choose a folder and relink selected objects' image texture nodes by matching file names"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
 
-    issue: bpy.props.EnumProperty(  # type: ignore[reportInvalidTypeForm]
-        name="Issue",
-        items=(
-            ('BAD_NAMES', "Bad Names", "Object names that are not PascalCase or still have .001 suffixes"),
-            ('NAME_SYNC', "Name Sync", "Mesh data or material names do not match object names"),
-            ('MATERIAL_COUNT', "Material Count", "Objects do not have exactly one filled material slot"),
-            ('SHARED_MATERIALS', "Shared Materials", "Materials are used by more than one object"),
-            ('UV_CHANNELS', "UV Channels", "UV layers are not exactly UVMap and SimpleBake"),
-        ),
-        default='UV_CHANNELS',
+    directory: bpy.props.StringProperty(  # type: ignore[reportInvalidTypeForm]
+        name="Texture Directory",
+        subtype='DIR_PATH',
+    )
+    filter_folder: bpy.props.BoolProperty(  # type: ignore[reportInvalidTypeForm]
+        default=True,
+        options={'HIDDEN'},
     )
 
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
     def execute(self, context):
-        objects = iter_scope_objects(context, 'ALL')
-        if not objects:
-            self.report({'WARNING'}, "No mesh objects found in scope")
+        texture_directory = bpy.path.abspath(self.directory)
+        if not texture_directory or not os.path.isdir(texture_directory):
+            self.report({'WARNING'}, "Choose a valid texture directory")
             return {'CANCELLED'}
 
-        issues = audit_objects(objects)
-        issue_objects = get_issue_filter_objects(issues, self.issue)
-        if not issue_objects:
-            self.report({'INFO'}, "No objects found for this issue")
-            return {'FINISHED'}
+        try:
+            texture_paths, duplicate_keys = build_texture_directory_index(texture_directory)
+        except OSError as exc:
+            self.report({'ERROR'}, f"Cannot read texture directory: {exc}")
+            return {'CANCELLED'}
 
-        selected, hidden = select_scene_objects(context, issue_objects)
-        hidden_note = f", {hidden} not visible in current view layer" if hidden else ""
-        self.report({'INFO'}, f"Selected {selected} object(s){hidden_note}")
+        if not texture_paths:
+            self.report({'WARNING'}, "No supported texture files found in selected directory")
+            return {'CANCELLED'}
+
+        selected_objects = [
+            obj for obj in get_selected_target_objects(context)
+            if obj.type == 'MESH'
+        ]
+        if not selected_objects:
+            self.report({'WARNING'}, "No selected mesh objects found")
+            return {'CANCELLED'}
+
+        materials_to_update = []
+        material_keys = set()
+        missing_matches = 0
+        duplicate_matches = 0
+        for obj in selected_objects:
+            for material in iter_object_materials(obj):
+                has_matching_texture = False
+                for _node, image in iter_material_image_nodes(material):
+                    image_key = get_image_file_basename(image).lower()
+                    if image_key in duplicate_keys:
+                        duplicate_matches += 1
+                        continue
+                    if image_key not in texture_paths:
+                        missing_matches += 1
+                        continue
+                    has_matching_texture = True
+
+                if has_matching_texture:
+                    key = material.as_pointer()
+                    if key in material_keys:
+                        continue
+                    material_keys.add(key)
+                    materials_to_update.append(material)
+
+        if not materials_to_update:
+            self.report({'WARNING'}, "No matching texture files found for selected objects")
+            return {'CANCELLED'}
+
+        localized_materials = localize_materials_for_selected_objects(selected_objects, materials_to_update)
+
+        processed_materials = set()
+        loaded_images = {}
+        loaded_count = 0
+        relinked_nodes = 0
+        failed_loads = 0
+
+        for obj in selected_objects:
+            for material in iter_object_materials(obj):
+                material_key = material.as_pointer()
+                if material_key in processed_materials:
+                    continue
+                processed_materials.add(material_key)
+
+                for node, image in iter_material_image_nodes(material):
+                    target_path = get_matching_texture_path(image, texture_paths)
+                    if not target_path:
+                        continue
+
+                    color_space = image.colorspace_settings.name
+                    image_key = (target_path.lower(), color_space)
+                    replacement_image = loaded_images.get(image_key)
+                    if replacement_image is None:
+                        try:
+                            replacement_image = load_image_replacement(target_path, color_space)
+                        except Exception as exc:
+                            failed_loads += 1
+                            print(f"[PM Tools][VR Project] Texture load failed for {target_path}: {exc}")
+                            continue
+
+                        loaded_images[image_key] = replacement_image
+                        loaded_count += 1
+
+                    node.image = replacement_image
+                    relinked_nodes += 1
+
+        if relinked_nodes == 0:
+            self.report({'WARNING'}, "Nothing was relinked; matching texture files could not be loaded")
+            return {'CANCELLED'}
+
+        message = (
+            f"Loaded {loaded_count} texture(s), relinked {relinked_nodes} node(s)"
+        )
+        if localized_materials:
+            message += f", localized {localized_materials} material(s)"
+        if missing_matches:
+            message += f", missing {missing_matches} match(es)"
+        if duplicate_matches:
+            message += f", skipped {duplicate_matches} duplicate-name match(es)"
+        if failed_loads:
+            message += f", failed to load {failed_loads} texture(s)"
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 
-class PM_OT_VR_SelectReservedKeywords(bpy.types.Operator):
-    bl_idname = "pm_vr.select_reserved_keywords"
-    bl_label = "Select Reserved Words"
-    bl_description = "Select objects whose object or material names contain Scale Immersive reserved keywords"
-    bl_options = {'REGISTER'}
+class PM_OT_VR_ExternalizeSelectedTextures(bpy.types.Operator):
+    bl_idname = "pm_vr.externalize_selected_textures"
+    bl_label = "Unpack Selected Textures"
+    bl_description = (
+        "Save or copy selected objects' material textures to a folder near the blend file and relink them"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        objects = iter_scope_objects(context, 'ALL')
-        matches = get_objects_with_reserved_keywords(objects)
-        if not matches:
-            self.report({'INFO'}, "No reserved keywords found")
-            return {'FINISHED'}
+        selected_objects = [
+            obj for obj in get_selected_target_objects(context)
+            if obj.type == 'MESH'
+        ]
+        if not selected_objects:
+            self.report({'WARNING'}, "No selected mesh objects found")
+            return {'CANCELLED'}
 
-        print("[PM Tools][VR Project] Reserved keyword matches:")
-        for obj, categories in matches[:80]:
-            print(f"  {obj.name}: {', '.join(categories)}")
-        if len(matches) > 80:
-            print(f"  ...and {len(matches) - 80} more")
+        output_dir = get_selected_texture_export_directory()
+        if not output_dir:
+            self.report({'WARNING'}, "Save the blend file before unpacking selected textures")
+            return {'CANCELLED'}
 
-        selected, hidden = select_scene_objects(context, [obj for obj, _categories in matches])
-        hidden_note = f", {hidden} not visible in current view layer" if hidden else ""
-        self.report({'INFO'}, f"Selected {selected} reserved-keyword object(s){hidden_note}")
-        return {'FINISHED'}
+        materials_to_update = []
+        material_keys = set()
+        for obj in selected_objects:
+            for material in iter_object_materials(obj):
+                if not any(True for _node, _image in iter_material_image_nodes(material)):
+                    continue
 
+                key = material.as_pointer()
+                if key in material_keys:
+                    continue
+                material_keys.add(key)
+                materials_to_update.append(material)
 
-class PM_OT_VR_SelectMissingTextures(bpy.types.Operator):
-    bl_idname = "pm_vr.select_missing_textures"
-    bl_label = "Select Missing Textures"
-    bl_description = "Select objects using unpacked image textures whose source files cannot be found"
-    bl_options = {'REGISTER'}
+        if not materials_to_update:
+            self.report({'WARNING'}, "No image texture nodes found on selected objects")
+            return {'CANCELLED'}
 
-    def execute(self, context):
-        objects = iter_scope_objects(context, 'ALL')
-        problem_objects = get_objects_with_missing_textures(objects)
-        if not problem_objects:
-            self.report({'INFO'}, "No missing texture file references found")
-            return {'FINISHED'}
+        os.makedirs(output_dir, exist_ok=True)
+        localized_materials = localize_materials_for_selected_objects(selected_objects, materials_to_update)
 
-        selected, hidden = select_scene_objects(context, problem_objects)
-        hidden_note = f", {hidden} not visible in current view layer" if hidden else ""
-        self.report({'WARNING'}, f"Selected {selected} object(s) with missing textures{hidden_note}")
+        if getattr(bpy.data, "use_autopack", False):
+            bpy.data.use_autopack = False
+            disabled_autopack = True
+        else:
+            disabled_autopack = False
+
+        processed_materials = set()
+        externalized_images = {}
+        used_target_paths = set()
+        externalized_count = 0
+        relinked_nodes = 0
+        failed_exports = 0
+
+        for obj in selected_objects:
+            for material in iter_object_materials(obj):
+                material_key = material.as_pointer()
+                if material_key in processed_materials:
+                    continue
+                processed_materials.add(material_key)
+
+                for node, image in iter_material_image_nodes(material):
+                    image_key = image.as_pointer()
+                    replacement_image = externalized_images.get(image_key)
+                    if replacement_image is None:
+                        source_path = get_image_absolute_path(image)
+                        if (
+                            source_path
+                            and os.path.exists(source_path)
+                            and os.path.abspath(os.path.dirname(source_path)) == os.path.abspath(output_dir)
+                        ):
+                            target_path = source_path
+                            used_target_paths.add(target_path.lower())
+                        else:
+                            target_path = build_unique_texture_output_path(image, output_dir, used_target_paths)
+
+                        try:
+                            externalize_image_file(image, target_path)
+                            replacement_image = load_image_replacement(
+                                target_path,
+                                image.colorspace_settings.name,
+                            )
+                        except Exception as exc:
+                            failed_exports += 1
+                            print(f"[PM Tools][VR Project] Texture externalize failed for {image.name}: {exc}")
+                            continue
+
+                        externalized_images[image_key] = replacement_image
+                        externalized_count += 1
+
+                    node.image = replacement_image
+                    relinked_nodes += 1
+
+        if relinked_nodes == 0:
+            self.report({'WARNING'}, "Nothing was relinked; selected textures could not be externalized")
+            return {'CANCELLED'}
+
+        message = (
+            f"Externalized {externalized_count} texture(s), relinked {relinked_nodes} node(s)"
+        )
+        if localized_materials:
+            message += f", localized {localized_materials} material(s)"
+        if disabled_autopack:
+            message += ", disabled Auto Pack"
+        if failed_exports:
+            message += f", failed {failed_exports} texture(s)"
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 
@@ -753,48 +1061,22 @@ def draw_ui(layout, context):
     box.label(text="Scale Immersive Prep", icon='WORLD')
 
     audit_col = box.column(align=True)
-    row = audit_col.row(align=True)
-    op = row.operator(PM_OT_VR_AuditObjectPrep.bl_idname, text="Audit Selected", icon='CHECKMARK')
+    op = audit_col.operator(PM_OT_VR_AuditObjectPrep.bl_idname, text="Audit Selected", icon='CHECKMARK')
     op.scope = 'SELECTED'
-    op = row.operator(PM_OT_VR_AuditObjectPrep.bl_idname, text="Audit All", icon='CHECKMARK')
-    op.scope = 'ALL'
-
-    row = audit_col.row(align=True)
-    op = row.operator(PM_OT_VR_SelectAuditIssue.bl_idname, text="Bad Names", icon='SORTALPHA')
-    op.issue = 'BAD_NAMES'
-    op = row.operator(PM_OT_VR_SelectAuditIssue.bl_idname, text="Name Sync", icon='LINKED')
-    op.issue = 'NAME_SYNC'
-
-    row = audit_col.row(align=True)
-    op = row.operator(PM_OT_VR_SelectAuditIssue.bl_idname, text="One Material Issues", icon='MATERIAL')
-    op.issue = 'MATERIAL_COUNT'
-    op = row.operator(PM_OT_VR_SelectAuditIssue.bl_idname, text="Shared Materials", icon='LINKED')
-    op.issue = 'SHARED_MATERIALS'
-
-    row = audit_col.row(align=True)
-    op = row.operator(PM_OT_VR_SelectAuditIssue.bl_idname, text="UV Issues", icon='GROUP_UVS')
-    op.issue = 'UV_CHANNELS'
-    row.operator(PM_OT_VR_SelectReservedKeywords.bl_idname, text="Reserved Words", icon='VIEWZOOM')
 
     box.separator()
 
     name_col = box.column(align=True)
     name_col.label(text="Copy Object Names:")
-    row = name_col.row(align=True)
-    op = row.operator(PM_OT_VR_SyncNamesFromObjects.bl_idname, text="Sync Selected", icon='OUTLINER_OB_MESH')
+    op = name_col.operator(PM_OT_VR_SyncNamesFromObjects.bl_idname, text="Sync Selected", icon='OUTLINER_OB_MESH')
     op.scope = 'SELECTED'
-    op = row.operator(PM_OT_VR_SyncNamesFromObjects.bl_idname, text="Sync All", icon='OUTLINER_OB_MESH')
-    op.scope = 'ALL'
 
     box.separator()
 
     uv_col = box.column(align=True)
     uv_col.label(text="UV Channels:")
-    row = uv_col.row(align=True)
-    op = row.operator(PM_OT_VR_CheckUVChannels.bl_idname, text="Check UV Selected", icon='GROUP_UVS')
+    op = uv_col.operator(PM_OT_VR_CheckUVChannels.bl_idname, text="Check UV Selected", icon='GROUP_UVS')
     op.scope = 'SELECTED'
-    op = row.operator(PM_OT_VR_CheckUVChannels.bl_idname, text="Check UV All", icon='GROUP_UVS')
-    op.scope = 'ALL'
     row = uv_col.row(align=True)
     row.operator(PM_OT_VR_ActivateUVMap.bl_idname, text="Activate UVMap", icon='GROUP_UVS')
     row.operator(PM_OT_VR_ActivateSimpleBake.bl_idname, text="Activate SimpleBake", icon='GROUP_UVS')
@@ -803,17 +1085,30 @@ def draw_ui(layout, context):
 
     texture_col = box.column(align=True)
     texture_col.label(text="Textures:")
-    texture_col.operator(PM_OT_VR_SelectMissingTextures.bl_idname, text="Missing Textures", icon='ERROR')
     texture_col.operator(PM_OT_VR_AddTextureSuffix.bl_idname, text="Add Texel Suffix", icon='TEXTURE')
+
+    box.separator()
+
+    texture_file_col = box.column(align=True)
+    texture_file_col.label(text="Texture Files:")
+    texture_file_col.operator(
+        PM_OT_VR_RelinkSelectedTexturesFromFolder.bl_idname,
+        text="Relink Selected Textures",
+        icon='FILE_FOLDER',
+    )
+    texture_file_col.operator(
+        PM_OT_VR_ExternalizeSelectedTextures.bl_idname,
+        text="Unpack Selected Textures",
+        icon='PACKAGE',
+    )
 
 
 classes = (
     PM_OT_VR_AuditObjectPrep,
     PM_OT_VR_SyncNamesFromObjects,
     PM_OT_VR_CheckUVChannels,
-    PM_OT_VR_SelectAuditIssue,
-    PM_OT_VR_SelectReservedKeywords,
-    PM_OT_VR_SelectMissingTextures,
+    PM_OT_VR_RelinkSelectedTexturesFromFolder,
+    PM_OT_VR_ExternalizeSelectedTextures,
     PM_OT_VR_AddTextureSuffix,
     PM_OT_VR_ActivateUVMap,
     PM_OT_VR_ActivateSimpleBake,
