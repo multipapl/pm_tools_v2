@@ -862,7 +862,7 @@ TEXTURE_OPTIONS = {
 }
 CM_PER_BLEND_UNIT = 100.0
 
-TD_SUFFIX_PATTERN = re.compile(r"_(1K|2K|4K)$")
+TD_SUFFIX_PATTERN = re.compile(r"_(?:1[K\u041a]|2[K\u041a]|4[K\u041a])(?=_|$)")
 
 
 def remove_td_suffix(name):
@@ -925,7 +925,11 @@ def get_mesh_areas(obj):
         obj_eval.to_mesh_clear()
 
 
-def choose_texture_suffix(uv_area, mesh_area_cm2):
+def get_target_td(context):
+    return getattr(context.scene, "pm_vr_target_td", TARGET_TD_PX_PER_CM)
+
+
+def choose_texture_suffix(uv_area, mesh_area_cm2, target_td):
     if mesh_area_cm2 <= 0.0 or uv_area <= 0.0:
         return "4K", {}
 
@@ -934,7 +938,7 @@ def choose_texture_suffix(uv_area, mesh_area_cm2):
         td_results[suffix] = size * math.sqrt(uv_area / mesh_area_cm2)
 
     for suffix, size in sorted(TEXTURE_OPTIONS.items(), key=lambda item: item[1]):
-        if td_results[suffix] >= TARGET_TD_PX_PER_CM:
+        if td_results[suffix] >= target_td:
             return suffix, td_results
 
     return "4K", td_results
@@ -944,9 +948,57 @@ class PM_OT_VR_AddTextureSuffix(bpy.types.Operator):
     bl_idname = "pm_vr.add_texture_suffix"
     bl_label = "Add Texture Suffix"
     bl_description = (
-        "Append _1K/_2K/_4K suffix based on texel density target "
-        f"({TARGET_TD_PX_PER_CM} px/cm, UV: {SIMPLE_BAKE_UV_NAME})"
+        "Append _1K/_2K/_4K suffix based on the current texel density target "
+        f"(UV: {SIMPLE_BAKE_UV_NAME})"
     )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected = [
+            obj for obj in get_selected_target_objects(context)
+            if obj.type == 'MESH'
+        ]
+        if not selected:
+            self.report({'WARNING'}, "No selected mesh objects found")
+            return {'CANCELLED'}
+
+        renamed = 0
+        skipped = 0
+        target_td = get_target_td(context)
+
+        for obj in selected:
+            mesh_area_cm2, uv_area, error = get_mesh_areas(obj)
+            if error:
+                skipped += 1
+                print(f"[PM Tools][VR Project] SKIPPED {obj.name}: {error}")
+                continue
+
+            suffix, td_results = choose_texture_suffix(uv_area, mesh_area_cm2, target_td)
+            base_name = remove_td_suffix(obj.name)
+            new_name = f"{base_name}_{suffix}"
+            obj.name = new_name
+            renamed += 1
+
+            print(
+                f"[PM Tools][VR Project] {base_name} -> {new_name} | "
+                f"Area: {mesh_area_cm2:.1f} cm\u00b2 | "
+                f"TD 1K: {td_results.get('1K', 0):.1f}  "
+                f"2K: {td_results.get('2K', 0):.1f}  "
+                f"4K: {td_results.get('4K', 0):.1f} px/cm | "
+                f"Target: {target_td:.1f} px/cm"
+            )
+
+        msg = f"Renamed {renamed} object(s)"
+        if skipped:
+            msg += f", skipped {skipped}"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+class PM_OT_VR_RemoveTextureSuffix(bpy.types.Operator):
+    bl_idname = "pm_vr.remove_texture_suffix"
+    bl_label = "Remove Texture Suffix"
+    bl_description = "Remove _1K/_2K/_4K suffix tokens from selected mesh object names"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -962,27 +1014,15 @@ class PM_OT_VR_AddTextureSuffix(bpy.types.Operator):
         skipped = 0
 
         for obj in selected:
-            mesh_area_cm2, uv_area, error = get_mesh_areas(obj)
-            if error:
+            new_name = remove_td_suffix(obj.name)
+            if new_name == obj.name:
                 skipped += 1
-                print(f"[PM Tools][VR Project] SKIPPED {obj.name}: {error}")
                 continue
 
-            suffix, td_results = choose_texture_suffix(uv_area, mesh_area_cm2)
-            base_name = remove_td_suffix(obj.name)
-            new_name = f"{base_name}_{suffix}"
             obj.name = new_name
             renamed += 1
 
-            print(
-                f"[PM Tools][VR Project] {base_name} -> {new_name} | "
-                f"Area: {mesh_area_cm2:.1f} cm\u00b2 | "
-                f"TD 1K: {td_results.get('1K', 0):.1f}  "
-                f"2K: {td_results.get('2K', 0):.1f}  "
-                f"4K: {td_results.get('4K', 0):.1f} px/cm"
-            )
-
-        msg = f"Renamed {renamed} object(s)"
+        msg = f"Removed suffix from {renamed} object(s)"
         if skipped:
             msg += f", skipped {skipped}"
         self.report({'INFO'}, msg)
@@ -1085,7 +1125,10 @@ def draw_ui(layout, context):
 
     texture_col = box.column(align=True)
     texture_col.label(text="Textures:")
-    texture_col.operator(PM_OT_VR_AddTextureSuffix.bl_idname, text="Add Texel Suffix", icon='TEXTURE')
+    texture_col.prop(context.scene, "pm_vr_target_td", text="Target TD px/cm")
+    row = texture_col.row(align=True)
+    row.operator(PM_OT_VR_AddTextureSuffix.bl_idname, text="Add Texel Suffix", icon='TEXTURE')
+    row.operator(PM_OT_VR_RemoveTextureSuffix.bl_idname, text="Remove", icon='X')
 
     box.separator()
 
@@ -1110,6 +1153,7 @@ classes = (
     PM_OT_VR_RelinkSelectedTexturesFromFolder,
     PM_OT_VR_ExternalizeSelectedTextures,
     PM_OT_VR_AddTextureSuffix,
+    PM_OT_VR_RemoveTextureSuffix,
     PM_OT_VR_ActivateUVMap,
     PM_OT_VR_ActivateSimpleBake,
 )
@@ -1118,8 +1162,20 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.pm_vr_target_td = bpy.props.FloatProperty(
+        name="Target Texel Density",
+        description="Texel density target in pixels per centimeter for _1K/_2K/_4K suffix selection",
+        default=TARGET_TD_PX_PER_CM,
+        min=0.1,
+        soft_min=1.0,
+        soft_max=20.0,
+        precision=1,
+        unit='NONE',
+    )
 
 
 def unregister():
+    if hasattr(bpy.types.Scene, "pm_vr_target_td"):
+        del bpy.types.Scene.pm_vr_target_td
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
