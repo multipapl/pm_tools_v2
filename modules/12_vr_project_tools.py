@@ -862,11 +862,27 @@ TEXTURE_OPTIONS = {
 }
 CM_PER_BLEND_UNIT = 100.0
 
-TD_SUFFIX_PATTERN = re.compile(r"_(?:1[K\u041a]|2[K\u041a]|4[K\u041a])(?=_|$)")
+TD_LABEL_TOKENS = {
+    "1K",
+    "2K",
+    "4K",
+    "1\u041a",
+    "2\u041a",
+    "4\u041a",
+}
 
 
 def remove_td_suffix(name):
-    return TD_SUFFIX_PATTERN.sub("", name)
+    parts = (name or "").split("_")
+    return "_".join(part for part in parts if part not in TD_LABEL_TOKENS)
+
+
+def build_td_name(base_name, suffix, use_prefix):
+    if not base_name:
+        return suffix
+    if use_prefix:
+        return f"{suffix}_{base_name}"
+    return f"{base_name}_{suffix}"
 
 
 def polygon_area_2d(points):
@@ -929,6 +945,10 @@ def get_target_td(context):
     return getattr(context.scene, "pm_vr_target_td", TARGET_TD_PX_PER_CM)
 
 
+def get_use_texture_prefix(context):
+    return getattr(context.scene, "pm_vr_use_texture_prefix", False)
+
+
 def choose_texture_suffix(uv_area, mesh_area_cm2, target_td):
     if mesh_area_cm2 <= 0.0 or uv_area <= 0.0:
         return "4K", {}
@@ -946,9 +966,9 @@ def choose_texture_suffix(uv_area, mesh_area_cm2, target_td):
 
 class PM_OT_VR_AddTextureSuffix(bpy.types.Operator):
     bl_idname = "pm_vr.add_texture_suffix"
-    bl_label = "Add Texture Suffix"
+    bl_label = "Add Texture Label"
     bl_description = (
-        "Append _1K/_2K/_4K suffix based on the current texel density target "
+        "Add 1K/2K/4K prefix or suffix based on the current texel density target "
         f"(UV: {SIMPLE_BAKE_UV_NAME})"
     )
     bl_options = {'REGISTER', 'UNDO'}
@@ -965,6 +985,7 @@ class PM_OT_VR_AddTextureSuffix(bpy.types.Operator):
         renamed = 0
         skipped = 0
         target_td = get_target_td(context)
+        use_prefix = get_use_texture_prefix(context)
 
         for obj in selected:
             mesh_area_cm2, uv_area, error = get_mesh_areas(obj)
@@ -975,7 +996,7 @@ class PM_OT_VR_AddTextureSuffix(bpy.types.Operator):
 
             suffix, td_results = choose_texture_suffix(uv_area, mesh_area_cm2, target_td)
             base_name = remove_td_suffix(obj.name)
-            new_name = f"{base_name}_{suffix}"
+            new_name = build_td_name(base_name, suffix, use_prefix)
             obj.name = new_name
             renamed += 1
 
@@ -997,8 +1018,8 @@ class PM_OT_VR_AddTextureSuffix(bpy.types.Operator):
 
 class PM_OT_VR_RemoveTextureSuffix(bpy.types.Operator):
     bl_idname = "pm_vr.remove_texture_suffix"
-    bl_label = "Remove Texture Suffix"
-    bl_description = "Remove _1K/_2K/_4K suffix tokens from selected mesh object names"
+    bl_label = "Remove Texture Label"
+    bl_description = "Remove 1K/2K/4K prefix or suffix tokens from selected mesh object names"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -1126,8 +1147,9 @@ def draw_ui(layout, context):
     texture_col = box.column(align=True)
     texture_col.label(text="Textures:")
     texture_col.prop(context.scene, "pm_vr_target_td", text="Target TD px/cm")
+    texture_col.prop(context.scene, "pm_vr_use_texture_prefix", text="Use Prefix")
     row = texture_col.row(align=True)
-    row.operator(PM_OT_VR_AddTextureSuffix.bl_idname, text="Add Texel Suffix", icon='TEXTURE')
+    row.operator(PM_OT_VR_AddTextureSuffix.bl_idname, text="Add Texel Label", icon='TEXTURE')
     row.operator(PM_OT_VR_RemoveTextureSuffix.bl_idname, text="Remove", icon='X')
 
     box.separator()
@@ -1172,9 +1194,16 @@ def register():
         precision=1,
         unit='NONE',
     )
+    bpy.types.Scene.pm_vr_use_texture_prefix = bpy.props.BoolProperty(
+        name="Use Prefix",
+        description="Put 1K/2K/4K before the object name instead of after it",
+        default=False,
+    )
 
 
 def unregister():
+    if hasattr(bpy.types.Scene, "pm_vr_use_texture_prefix"):
+        del bpy.types.Scene.pm_vr_use_texture_prefix
     if hasattr(bpy.types.Scene, "pm_vr_target_td"):
         del bpy.types.Scene.pm_vr_target_td
     for cls in reversed(classes):
