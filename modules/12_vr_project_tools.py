@@ -862,19 +862,27 @@ TEXTURE_OPTIONS = {
 }
 CM_PER_BLEND_UNIT = 100.0
 
-TD_LABEL_TOKENS = {
-    "1K",
-    "2K",
-    "4K",
-    "1\u041a",
-    "2\u041a",
-    "4\u041a",
-}
+TD_LABEL_TEXT_VARIANTS = (
+    "_1K",
+    "_2K",
+    "_4K",
+    "1K_",
+    "2K_",
+    "4K_",
+    "_1\u041a",
+    "_2\u041a",
+    "_4\u041a",
+    "1\u041a_",
+    "2\u041a_",
+    "4\u041a_",
+)
 
 
 def remove_td_suffix(name):
-    parts = (name or "").split("_")
-    return "_".join(part for part in parts if part not in TD_LABEL_TOKENS)
+    new_name = name or ""
+    for variant in TD_LABEL_TEXT_VARIANTS:
+        new_name = new_name.replace(variant, "")
+    return new_name
 
 
 def build_td_name(base_name, suffix, use_prefix):
