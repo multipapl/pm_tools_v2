@@ -1,6 +1,12 @@
 # PM Lightmap Baker v1
 
-Status: specification only; implementation has not started.
+Status: implemented in `modules/13_lightmap_baker`.
+
+Automated Blender smoke coverage includes colored HDR lighting, compositor
+denoise with albedo/normal guides, material hookup, UV preservation, internal
+and PIZ OpenEXR output, resolution override, skip/fallback behavior, state
+restoration, and transactional rebaking. Final visual approval should still be
+performed on representative production scenes.
 
 ## Goal
 
@@ -331,6 +337,12 @@ Finish with a concise summary:
 - completed with warnings;
 - failed.
 
+During a foreground bake, mirror the live log into a 3D View overlay. Show the
+current object, current bake/denoise/export stage, elapsed time, and overall
+batch progress. The overlay must clean itself up after completion and when the
+add-on is disabled. Do not use Blender's status-bar progress API because it
+changes the cursor and conflicts with Cycles' own bake progress.
+
 ## Non-goals for v1
 
 Do not implement:
@@ -379,3 +391,5 @@ The first version is complete when the following are verified:
 13. Original objects are hidden only after their replacement succeeds.
 14. User selection, mode, render settings, visibility, and compositor graph
     are restored after success, failure, and cancellation.
+15. Foreground baking shows live viewport feedback and leaves no draw handler
+    or progress state behind after completion.
