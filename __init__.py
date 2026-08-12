@@ -6,8 +6,8 @@ import os
 bl_info = {
     "name": "PM Tools v2.1",
     "author": "User",
-    "version": (2, 1, 0),
-    "blender": (4, 2, 0),
+    "version": (2, 1, 1),
+    "blender": (5, 2, 0),
     "location": "View3D > N-Panel > PM Tools",
     "description": "Modular tools for Archviz with single UI panel",
     "category": "Interface",

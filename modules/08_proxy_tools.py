@@ -1,6 +1,11 @@
 import bpy
 import os
 
+from ..geometry_nodes_modifier import (
+    get_modifier_input,
+    has_modifier_input,
+    set_modifier_input,
+)
 from ..selection_targets import get_active_target_objects, get_selected_target_objects
 
 UI_CATEGORY = "SCENE_OPTIMIZATION"
@@ -56,12 +61,8 @@ def sync_proxy_param(settings, context, socket_name, prop_name, forced_id=None):
             if mod.type == 'NODES' and mod.node_group:
                 target_id = forced_id or get_socket_identifier(mod.node_group, socket_name)
                 
-                if target_id and target_id in mod:
-                    try:
-                        mod[target_id] = prop_value
-                        obj.update_tag()
-                    except:
-                        pass
+                if set_modifier_input(mod, target_id, prop_value):
+                    obj.update_tag()
 
 def sync_proxy_color_all_channels(settings, context):
     """
@@ -95,11 +96,7 @@ def sync_proxy_color_all_channels(settings, context):
             if mod.type == 'NODES' and mod.node_group:
                 target_id = get_socket_identifier(mod.node_group, "Proxy color") or "Input_12"
                 
-                if target_id and target_id in mod:
-                    try:
-                        mod[target_id] = color_rgba
-                    except:
-                        pass
+                set_modifier_input(mod, target_id, color_rgba)
             
             obj.update_tag()
 
@@ -208,9 +205,7 @@ class PM_OT_AddProxyModifier(bpy.types.Operator):
                 obj.color = color_rgba
                 target_id = get_socket_identifier(node_group, "Proxy color") or "Input_12"
                     
-                if target_id and target_id in mod:
-                    try: mod[target_id] = color_rgba
-                    except: pass
+                set_modifier_input(mod, target_id, color_rgba)
                     
         return {'FINISHED'}
 
@@ -266,9 +261,9 @@ class PM_OT_CopyProxySettings(bpy.types.Operator):
         }
         
         for prop_name, (socket_name, forced_id) in mapping.items():
-            target_id = forced_id if forced_id in mod else get_socket_identifier(mod.node_group, socket_name)
-            if target_id and target_id in mod:
-                val = mod[target_id]
+            target_id = forced_id if has_modifier_input(mod, forced_id) else get_socket_identifier(mod.node_group, socket_name)
+            if has_modifier_input(mod, target_id):
+                val = get_modifier_input(mod, target_id)
                 if hasattr(val, "__len__") and not isinstance(val, (str, bytes)):
                     if len(val) >= 3:
                         setattr(settings, prop_name, val[:3])

@@ -289,7 +289,8 @@ class PM_OT_SaveCurrentAsPreset(bpy.types.Operator):
 
     def invoke(self, context, event):
         # Capture selection while we are still in the Outliner interaction context
-        sel_cols = [id.name for id in context.selected_ids if isinstance(id, bpy.types.Collection)]
+        selected_ids = getattr(context, "selected_ids", ())
+        sel_cols = [item.name for item in selected_ids if isinstance(item, bpy.types.Collection)]
         
         if not sel_cols and context.view_layer.active_layer_collection:
             active_col = context.view_layer.active_layer_collection.collection

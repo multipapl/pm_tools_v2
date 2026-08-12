@@ -3,6 +3,7 @@ import os
 import re
 import uuid
 
+from ..geometry_nodes_modifier import set_modifier_input
 from ..selection_targets import (
     get_selected_target_objects,
     is_collection_instance,
@@ -256,11 +257,11 @@ class PM_MOG_Manager:
             return False
 
         socket_identifier = PM_MOG_Manager.get_socket_identifier(node_group, MATERIAL_SOCKET_NAME)
-        if socket_identifier and socket_identifier in modifier:
-            modifier[socket_identifier] = material
-        elif MATERIAL_SOCKET_IDENTIFIER in modifier:
-            modifier[MATERIAL_SOCKET_IDENTIFIER] = material
-        else:
+        if not set_modifier_input(modifier, socket_identifier, material) and not set_modifier_input(
+            modifier,
+            MATERIAL_SOCKET_IDENTIFIER,
+            material,
+        ):
             return False
 
         obj.pm_mog_group_uid = group.uid
